@@ -1,0 +1,1576 @@
+#include <bitset>
+#include <algorithm>
+#include <cmath>
+
+#include <print>
+
+#include "graphics.h"
+
+// Отрезок в мировом пространстве задан двумя точками A и B.
+// Точкам A и B, после преобразований (трансформации, проекция) соответствуют две точки экранных координат A' и B'.
+// Точки A' и B' мы округляем до целых значений, оставляя компоненты Z неизменными.
+// Целочисленным точкам A'' и B'' соответствуют какие-то точки в мировом пространстве.
+// При этом, трёхмерные образы точек A'' и B'' в общем случае не совпадают с точками A и B.
+// Но при этом они лежат в тех же Z-плоскостях, поскольку Z-компоненты мы оставили без изменений.
+// 
+// То есть, в общем случае мы растеризуем образ не истинного отрезка AB, а некоторого его "соседа", координаты начала и конца которого
+// в мировом пространстве проецируются прямиком в целочисленные значения X'' и Y'', а Z совпадают со значениями Z точек
+// начала и конца истинного отрезка в пространстве.
+//
+// Мы могли бы интерполировать Z вдоль истинного отрезка, приводя, скажем, Y координату к целочисленной. Но это не имеет особого смысла,
+// поскольку X' в общем случае всё-равно останется дробным, а горизонтальная интерполяция Z для отрезка уже не имеет смысла
+// (в треугольнике это была бы интерполяция вдоль скан-линии).
+void draw_line_dda_z(float x0_f, float y0_f, float z0, float x1_f, float y1_f, float z1, Color color, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	// Не рисуем, если линия - полностью за пределами экрана.
+	if (!clip_line_coh_suth_z(x0_f, y0_f, z0, x1_f, y1_f, z1, framebuffer))
+		return;
+	int x0 = static_cast<int>(std::round(x0_f));
+	int y0 = static_cast<int>(std::round(y0_f));
+	int x1 = static_cast<int>(std::round(x1_f));
+	int y1 = static_cast<int>(std::round(y1_f));
+
+	// Vertical.
+	if (x0 == x1) {
+		// Make ascending.
+		if (y0 > y1) {
+			std::swap(y0, y1);
+			std::swap(z0, z1);
+		}
+
+		const float z_slope = (z1 - z0) / (y1 - y0);
+		float z_accum = z0;
+		for (int y = y0; y <= y1; ++y) {
+			if (perform_depth_test(x0, y, z_accum, z_buffer))
+				set_pixel_color(x0, y, color, framebuffer);
+
+			z_accum += z_slope;
+		}
+	}
+	// Horizontal.
+	else if (y0 == y1) {
+		// Make ascending.
+		if (x0 > x1) {
+			std::swap(x0, x1);
+			std::swap(z0, z1);
+		}
+
+		const float z_slope = (z1 - z0) / (x1 - x0);
+		float z_accum = z0;
+		for (int x = x0; x <= x1; ++x) {
+			if (perform_depth_test(x, y0, z_accum, z_buffer))
+				set_pixel_color(x, y0, color, framebuffer);
+
+			z_accum += z_slope;
+		}
+	}
+
+	int dy = y1 - y0;
+	int dx = x1 - x0;
+
+	// Non-steep.
+	if (std::abs(dy) <= std::abs(dx)) {
+		// Make ascending.
+		if (x0 > x1) {
+			std::swap(x0, x1);
+			std::swap(y0, y1);
+			std::swap(z0, z1);
+			dx = -dx;
+			dy = -dy;
+		}
+
+		const float slope = static_cast<float>(dy) / dx;
+		const float z_slope = (z1 - z0) / dx;
+
+		float y_accum = static_cast<float>(y0);
+		float z_accum = z0;
+		for (int x = x0; x <= x1; x++) {
+			int y = static_cast<int>(std::round(y_accum));
+
+			if (perform_depth_test(x, y, z_accum, z_buffer))
+				set_pixel_color(x, y, color, framebuffer);
+
+			y_accum += slope;
+			z_accum += z_slope;
+		}
+	}
+	// Steep.
+	else {
+		// Make ascending.
+		if (y0 > y1) {
+			std::swap(y0, y1);
+			std::swap(x0, x1);
+			std::swap(z0, z1);
+			dy = -dy;
+			dx = -dx;
+		}
+
+		const float inv_slope = static_cast<float>(dx) / dy;
+		const float z_slope = (z1 - z0) / dy;
+
+		float x_accum = static_cast<float>(x0);
+		float z_accum = z0; // Keeps current fragment z.
+		for (int y = y0; y <= y1; y++) {
+			int x = static_cast<int>(std::round(x_accum));
+
+			if (perform_depth_test(x, y, z_accum, z_buffer))
+				set_pixel_color(x, y, color, framebuffer);
+
+			x_accum += inv_slope;
+			z_accum += z_slope;
+		}
+	}
+}
+
+bool clip_line_coh_suth_z(float& x0, float& y0, float& z0, float& x1, float& y1, float& z1, const Framebuffer& framebuffer) {
+	enum EdgeBit {
+		left = 3,
+		right = 2,
+		top = 1,
+		bottom = 0
+	};
+
+	struct Point {
+		float x;
+		float y;
+		float z;
+		std::bitset<4> region_code;
+	};
+
+	Point p0{ x0, y0, z0 };
+	p0.region_code.set(EdgeBit::left, p0.x < 0);
+	p0.region_code.set(EdgeBit::right, p0.x > framebuffer.w - 1);
+	p0.region_code.set(EdgeBit::top, p0.y < 0);
+	p0.region_code.set(EdgeBit::bottom, p0.y > framebuffer.h - 1);
+
+	Point p1{ x1, y1, z1 };
+	p1.region_code.set(EdgeBit::left, p1.x < 0);
+	p1.region_code.set(EdgeBit::right, p1.x > framebuffer.w - 1);
+	p1.region_code.set(EdgeBit::top, p1.y < 0);
+	p1.region_code.set(EdgeBit::bottom, p1.y > framebuffer.h - 1);
+
+	bool line_inside = (p0.region_code | p1.region_code).none();
+	bool line_outside = (p0.region_code & p1.region_code).any();
+	while (!line_inside && !line_outside) {
+		// Make sure the first point is the one that is outside.
+		if (p0.region_code.none())
+			std::swap(p0, p1);
+
+		// Find the first edge outside of which the point is.
+		EdgeBit first_edge{};
+		for (int i = 3; i >= 0; --i) {
+			if (p0.region_code[i]) {
+				first_edge = static_cast<EdgeBit>(i);
+				break;
+			}
+		}
+
+		if (first_edge == EdgeBit::left || first_edge == EdgeBit::right) {
+			float edge_x = first_edge == EdgeBit::left ? 0.0f : static_cast<float>(framebuffer.w - 1);
+			float slope = (p1.y - p0.y) / (p1.x - p0.x);
+			float z_slope = (p1.z - p0.z) / (p1.x - p0.x);
+
+			float x_excess = edge_x - p0.x;
+			p0.x = edge_x;
+			p0.y += x_excess * slope;
+			p0.z += x_excess * z_slope;
+		}
+		else {
+			float edge_y = first_edge == EdgeBit::top ? 0.0f : static_cast<float>(framebuffer.h - 1);
+			float inv_slope = (p1.x - p0.x) / (p1.y - p0.y);
+			float z_slope = (p1.z - p0.z) / (p1.y - p0.y);
+
+			float y_excess = edge_y - p0.y;
+			p0.y = edge_y;
+			p0.x += y_excess * inv_slope;
+			p0.z += y_excess * z_slope;
+		}
+
+		p0.region_code.set(EdgeBit::left, p0.x < 0);
+		p0.region_code.set(EdgeBit::right, p0.x > framebuffer.w - 1);
+		p0.region_code.set(EdgeBit::top, p0.y < 0);
+		p0.region_code.set(EdgeBit::bottom, p0.y > framebuffer.h - 1);
+
+		line_inside = (p0.region_code | p1.region_code).none();
+		line_outside = (p0.region_code & p1.region_code).any();
+	}
+
+	x0 = p0.x;
+	y0 = p0.y;
+	z0 = p0.z;
+	x1 = p1.x;
+	y1 = p1.y;
+	z1 = p1.z;
+
+	return line_inside;
+}
+
+void rasterize_polygons_flat_shaded_textured_affine(
+const std::vector<Polygon>& polygons,
+Texture texture,
+const Light& light,
+Framebuffer& framebuffer,
+ZBuffer& z_buffer,
+const MVP& mvp) {
+	Mat4f viewport = Mat4f::create_viewport(framebuffer.w, framebuffer.h);
+
+	std::vector<Polygon> cull_clip_passed_polygons;
+	for (Polygon polygon : polygons) {
+		for (Vertex& vertex : polygon.vertices) {
+			Vec4f pos(vertex.pos);
+			vertex.pos = Vec3f(mvp.view * mvp.model * pos);
+		}
+
+		// Frustum culling.
+		enum FrustumPlaneBit {
+			left,
+			right,
+			bottom,
+			top,
+			near,
+			far
+		};
+		float ratio = static_cast<float>(framebuffer.w) / framebuffer.h;
+		float fov_vert_half_rad = mvp.fov_vert_half_rad;
+		float d = 1.0f / std::tan(fov_vert_half_rad);
+		float frustum_x_slope_left = ratio / d;
+		float frustum_x_slope_right = -ratio / d;
+		float frustum_y_slope_bottom = 1.0f / d;
+		float frustum_y_slope_top = -1.0f / d;
+		std::array<std::bitset<6>, 3> region_codes{};
+		for (int i = 0; i < polygon.vertices.size(); ++i) {
+			// Куллинг с левой плоскостью фрустума.
+			float left_lim = polygon.vertices[i].pos.z * frustum_x_slope_left;
+			region_codes[i].set(FrustumPlaneBit::left, polygon.vertices[i].pos.x <= left_lim);
+
+			// Куллинг с правой плоскостью фрустума.
+			float right_lim = polygon.vertices[i].pos.z * frustum_x_slope_right;
+			region_codes[i].set(FrustumPlaneBit::right, polygon.vertices[i].pos.x >= right_lim);
+
+			// Куллинг с нижней плоскостью фрустума.
+			float bottom_lim = polygon.vertices[i].pos.z * frustum_y_slope_bottom;
+			region_codes[i].set(FrustumPlaneBit::bottom, polygon.vertices[i].pos.y <= bottom_lim);
+
+			// Куллинг с верхней плоскостью фрустума.
+			float top_lim = polygon.vertices[i].pos.z * frustum_y_slope_top;
+			region_codes[i].set(FrustumPlaneBit::top, polygon.vertices[i].pos.y >= top_lim);
+
+			// Куллинг с дальней плоскосотью фрустума.
+			float far_lim = mvp.far_plane;
+			region_codes[i].set(FrustumPlaneBit::far, polygon.vertices[i].pos.z <= far_lim);
+
+			// Куллинг с ближней плоскосотью фрустума.
+			float near_lim = mvp.near_plane;
+			region_codes[i].set(FrustumPlaneBit::near, polygon.vertices[i].pos.z >= near_lim);
+		}
+		// Все три вершины находятся за пределами общей плоскости - отбрасываем полигон.
+		if ((region_codes[0] & region_codes[1] & region_codes[2]).any()) {
+			continue;
+		}
+
+		// Near plane clipping.
+		int in = 0;
+		int out = 0;
+		int on_plane = 0;
+		for (Vertex& vertex : polygon.vertices) {
+			if (vertex.pos.z > mvp.near_plane) {
+				++out;
+			}
+			else if (vertex.pos.z < mvp.near_plane) {
+				++in;
+			}
+			else {
+				++on_plane;
+			}
+		}
+		Vertex v0 = polygon.vertices[0];
+		Vertex v1 = polygon.vertices[1];
+		Vertex v2 = polygon.vertices[2];
+		// Приводим названия к каноническому виду (упорядочиваем названия).
+		if (in == 1 && out == 2) {
+			if (v1.pos.z < mvp.near_plane) {
+				std::swap(v0, v1);
+				std::swap(v1, v2);
+			}
+			else if (v2.pos.z < mvp.near_plane) {
+				std::swap(v0, v2);
+				std::swap(v1, v2);
+			}
+
+			float t1 = (mvp.near_plane - v0.pos.z) / (v1.pos.z - v0.pos.z);
+			float t2 = (mvp.near_plane - v0.pos.z) / (v2.pos.z - v0.pos.z);
+
+			Vec3f dir1 = (v1.pos - v0.pos);
+			Vec3f dir2 = (v2.pos - v0.pos);
+
+			Vec3f v1_intersect_pos = v0.pos + dir1 * t1;
+			Vec3f v2_intersect_pos = v0.pos + dir2 * t2;
+
+			// Клиппинг текстурных координат.
+			float full_len1 = (v1.pos - v0.pos).length();
+			float u1_slope = (v1.tex_coord.u - v0.tex_coord.u) / full_len1;
+			float v1_slope = (v1.tex_coord.v - v0.tex_coord.v) / full_len1;
+			float clipped_len1 = (v1_intersect_pos - v0.pos).length();
+			float u1_clipped = v0.tex_coord.u + (clipped_len1 * u1_slope);
+			float v1_clipped = v0.tex_coord.v + (clipped_len1 * v1_slope);
+
+			float full_len2 = (v2.pos - v0.pos).length();
+			float u2_slope = (v2.tex_coord.u - v0.tex_coord.u) / full_len2;
+			float v2_slope = (v2.tex_coord.v - v0.tex_coord.v) / full_len2;
+			float clipped_len2 = (v2_intersect_pos - v0.pos).length();
+			float u2_clipped = v0.tex_coord.u + (clipped_len2 * u2_slope);
+			float v2_clipped = v0.tex_coord.v + (clipped_len2 * v2_slope);
+
+			Vertex v1_intersect{ v1_intersect_pos, TexCoord{u1_clipped, v1_clipped} };
+			Vertex v2_intersect{ v2_intersect_pos, TexCoord{u2_clipped, v2_clipped} };
+
+			polygon.vertices[0] = v0;
+			polygon.vertices[1] = v1_intersect;
+			polygon.vertices[2] = v2_intersect;
+			cull_clip_passed_polygons.push_back(polygon);
+		}
+		else if (in == 2 && out == 1) {
+			if (v0.pos.z > mvp.near_plane) {
+				std::swap(v0, v2);
+				std::swap(v0, v1);
+			}
+			else if (v1.pos.z > mvp.near_plane) {
+				std::swap(v1, v2);
+				std::swap(v0, v1);
+			}
+
+			float t0 = (mvp.near_plane - v0.pos.z) / (v2.pos.z - v0.pos.z);
+			float t1 = (mvp.near_plane - v1.pos.z) / (v2.pos.z - v1.pos.z);
+
+			Vec3f dir0 = (v2.pos - v0.pos);
+			Vec3f dir1 = (v2.pos - v1.pos);
+
+			Vec3f v0_intersect_pos = v0.pos + dir0 * t0;
+			Vec3f v1_intersect_pos = v1.pos + dir1 * t1;
+
+			// Клиппинг текстурных координат.
+			float full_len0 = (v2.pos - v0.pos).length();
+			float u0_slope = (v2.tex_coord.u - v0.tex_coord.u) / full_len0;
+			float v0_slope = (v2.tex_coord.v - v0.tex_coord.v) / full_len0;
+			float clipped_len0 = (v0_intersect_pos - v0.pos).length();
+			float u0_clipped = v0.tex_coord.u + (clipped_len0 * u0_slope);
+			float v0_clipped = v0.tex_coord.v + (clipped_len0 * v0_slope);
+
+			float full_len1 = (v2.pos - v1.pos).length();
+			float u1_slope = (v2.tex_coord.u - v1.tex_coord.u) / full_len1;
+			float v1_slope = (v2.tex_coord.v - v1.tex_coord.v) / full_len1;
+			float clipped_len1 = (v1_intersect_pos - v1.pos).length();
+			float u1_clipped = v1.tex_coord.u + (clipped_len1 * u1_slope);
+			float v1_clipped = v1.tex_coord.v + (clipped_len1 * v1_slope);
+
+			Vertex v0_intersect{ v0_intersect_pos, TexCoord{u0_clipped, v0_clipped} };
+			Vertex v1_intersect{ v1_intersect_pos, TexCoord{u1_clipped, v1_clipped} };
+
+			polygon.vertices[0] = v0;
+			polygon.vertices[1] = v1;
+			polygon.vertices[2] = v1_intersect;
+			cull_clip_passed_polygons.push_back(polygon);
+
+			Polygon new_poly{
+				.vertices = {v0, v1_intersect, v0_intersect}
+			};
+			cull_clip_passed_polygons.push_back(new_poly);
+		}
+		else if (in == 1 && out == 1 && on_plane == 1) {
+			if (v1.pos.z < mvp.near_plane) {
+				std::swap(v0, v1);
+				std::swap(v1, v2);
+			}
+			else if (v2.pos.z < mvp.near_plane) {
+				std::swap(v0, v2);
+				std::swap(v2, v1);
+			}
+
+			// Определяем вершину, лежащую за пределами ближней плоскости отсечения.
+			Vertex v_out = (v1.pos.z > v2.pos.z) ? v1 : v2;
+			float t_out = (mvp.near_plane - v0.pos.z) / (v_out.pos.z - v0.pos.z);
+			Vec3f dir_out = (v_out.pos - v0.pos);
+			Vec3f v_out_intersect_pos = v0.pos + dir_out * t_out;
+
+			// Клиппинг текстурных координат.
+			float full_len = (v_out.pos - v0.pos).length();
+			float u_slope = (v_out.tex_coord.u - v0.tex_coord.u) / full_len;
+			float v_slope = (v_out.tex_coord.v - v0.tex_coord.v) / full_len;
+			float clipped_len = (v_out_intersect_pos - v0.pos).length();
+			float u_clipped = v0.tex_coord.u + (clipped_len * u_slope);
+			float v_clipped = v0.tex_coord.v + (clipped_len * v_slope);
+
+			Vertex v_out_intersect{ v_out_intersect_pos, TexCoord{u_clipped, v_clipped} };
+
+			polygon.vertices[0] = v0;
+			if (v1.pos.z > v2.pos.z) {
+				polygon.vertices[1] = v_out_intersect;
+				polygon.vertices[2] = v2;
+			}
+			else {
+				polygon.vertices[2] = v_out_intersect;
+				polygon.vertices[1] = v1;
+			}
+			cull_clip_passed_polygons.push_back(polygon);
+		}
+		// Полигон находится целиком внутри фрустума.
+		else {
+			cull_clip_passed_polygons.push_back(polygon);
+		}
+	}
+
+	for (Polygon polygon : cull_clip_passed_polygons) {
+		// Вычисляем нормаль к полигону.
+		Vertex& v0 = polygon.vertices[0];
+		Vertex& v1 = polygon.vertices[1];
+		Vertex& v2 = polygon.vertices[2];
+		Vec3f edge1 = v1.pos - v0.pos;
+		Vec3f edge2 = v2.pos - v0.pos;
+		Vec3f polygon_normal = Vec3f::cross(edge1, edge2).get_normalized();
+
+		// Переводим все вершины полигона в NDC.
+		for (auto& vertex : polygon.vertices) {
+			Vec4f pos(vertex.pos);
+
+			Vec4f pos_clip = mvp.proj * pos;
+			Vec4f pos_ndc = pos_clip / pos_clip.w;
+			vertex.pos = Vec3f(pos_ndc);
+		}
+
+		// Backface culling.
+		// NOTE: Выполняем в NDC, поскольку фактически параллельный полигон
+		// после перспективного преобразования может оказаться видимым на проективной плоскости (если он не лежит в середине фрустума).
+		// Если же мы сделаем куллинг в исходном пространстве, то такой полигон будет отброшен и мы увидим дыру в геометрии.
+		Vec3f _edge1 = polygon.vertices[1].pos - polygon.vertices[0].pos;
+		Vec3f _edge2 = polygon.vertices[2].pos - polygon.vertices[0].pos;
+		Vec3f _polygon_normal = Vec3f::cross(_edge1, _edge2).get_normalized();
+		// NOTE: Возможно, стоит добавить сравнение с каким-то положительным эпсилон.
+		float dot = Vec3f::dot(_polygon_normal, Vec3f{ 0.0f, 0.0f, 1.0f });
+		if (dot <= 0.0f) {
+			continue;
+		}
+
+		std::vector<Vertex> vertices_screen;
+		for (const Vertex& vertex : polygon.vertices) {
+			Vec4f pos_ndc(vertex.pos);
+
+			Vec4f pos_screen = viewport * pos_ndc;
+
+			vertices_screen.push_back(Vertex{ Vec3f{pos_screen}, vertex.tex_coord });
+		}
+		Polygon polygon_screen{ {vertices_screen[0], vertices_screen[1], vertices_screen[2]}, polygon.albedo_color, polygon_normal };
+		float light_intensity = std::max(0.0f, Vec3f::dot(polygon_normal, -light.dir));
+		draw_polygon_flat_shaded_textured_affine(polygon_screen, texture, light_intensity, framebuffer, z_buffer);
+	}
+}
+
+void draw_polygon_flat_shaded_textured_affine(Polygon polygon_screen, Texture texture, float light_intensity, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем вершины по y по возрастанию.
+	if (v0.pos.y > v1.pos.y) {
+		std::swap(v0, v1);
+	}
+	if (v1.pos.y > v2.pos.y) {
+		std::swap(v1, v2);
+	}
+	if (v0.pos.y > v1.pos.y) {
+		std::swap(v0, v1);
+	}
+
+	// Trivial reject по верхней/нижней границе.
+	// NOTE: Нет смысла исключать ноль для верхней границы, поскольку в итоге все-равно
+	// получим ceil(0)-1 для y-координаты нижней скан-линии и растеризации не будет.
+	// Для нижней же границы ноль нужно исключить, чтобы не было пропуска пикселов по нижней стороне смежного треугольника.
+	if (v2.pos.y <= 0.0f || v0.pos.y > (framebuffer.h - 1)) {
+		return;
+	}
+
+	// Trivial reject по левой границе.
+	// NOTE: Нет смысла исключать ноль для левой границы, поскольку в итоге все-равно
+	// получим ceil(0)-1 для концов всех скан-линий и растеризации не будет.
+	if ((v0.pos.x <= 0.0f) && (v1.pos.x <= 0.0f) && (v2.pos.x <= 0.0f)) {
+		return;
+	}
+
+	// Trivial reject по правой границе.
+	// NOTE: Важно исключить ноль, чтобы не было пропуска пикселов по правой стороне смежного треугольника.
+	if ((v0.pos.x > (framebuffer.w - 1)) && (v1.pos.x > (framebuffer.w - 1)) && (v2.pos.x > (framebuffer.w - 1))) {
+		return;
+	}
+
+	// Классифицируем треугольник.
+	// NOTE: Проверяем на точное равенство, а не через epsilon, поскольку в противном случае
+	// возможна некорректная растеризация: пропуск пиксела или двойная растеризация одного и того же
+	// пиксела для двух смежных треугольников.
+	bool flat_bottom = (v1.pos.y == v2.pos.y);
+	bool flat_top = (v0.pos.y == v1.pos.y);
+	if (flat_bottom) {
+		draw_flat_bottom_polygon_flat_shaded_textured_affine(Polygon{ {v0, v1, v2} }, texture, light_intensity, framebuffer, z_buffer);
+	}
+	else if (flat_top) {
+		draw_flat_top_polygon_flat_shaded_textured_affine(Polygon{ {v0, v1, v2} }, texture, light_intensity, framebuffer, z_buffer);
+	}
+	else { // Разделяем треугольник на flat_bottom и flat_top.
+		float inv_slope = (v2.pos.x - v0.pos.x) / (v2.pos.y - v0.pos.y); // Наклон самого длинного ребра.
+		float height_top_triangle = v1.pos.y - v0.pos.y;
+
+		// Точка пересечения на длинном ребре при разделении треугольников.
+		float intersect_x = v0.pos.x + height_top_triangle * inv_slope;
+		float intersect_y = v1.pos.y;
+
+		// Интерполируем z-атрибут вдоль самого длинного ребра до точки пересечения.
+		float z_slope_vert = (v2.pos.z - v0.pos.z) / (v2.pos.y - v0.pos.y);
+		float intersect_z = v0.pos.z + (height_top_triangle * z_slope_vert);
+
+		// Интерполируем uv-атрибуты вдоль самого длинного ребра до точки пересечения.
+		float u_slope_vert = (v2.tex_coord.u - v0.tex_coord.u) / (v2.pos.y - v0.pos.y);
+		float v_slope_vert = (v2.tex_coord.v - v0.tex_coord.v) / (v2.pos.y - v0.pos.y);
+		float intersect_u = v0.tex_coord.u + (height_top_triangle * u_slope_vert);
+		float intersect_v = v0.tex_coord.v + (height_top_triangle * v_slope_vert);
+
+		Vertex intersect{ {intersect_x, intersect_y, intersect_z}, {intersect_u, intersect_v} };
+
+		draw_flat_bottom_polygon_flat_shaded_textured_affine_no_crack(Polygon{ {v0, intersect, v1} }, inv_slope, texture, light_intensity, framebuffer, z_buffer);
+		draw_flat_top_polygon_flat_shaded_textured_affine_no_crack(Polygon{ {intersect, v1, v2} }, inv_slope, v0, texture, light_intensity, framebuffer, z_buffer);
+	}
+}
+
+void draw_flat_bottom_polygon_flat_shaded_textured_affine(Polygon polygon_screen, Texture texture, float light_intensity, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем нижние вершины по x по возрастанию.
+	if (v1.pos.x > v2.pos.x) {
+		std::swap(v1, v2);
+	}
+
+	float height = v2.pos.y - v0.pos.y; // Определяем высоту по правой нижней вершине.
+	float slope_left_inv = (v1.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v0.pos.x) / height;
+
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v1.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v0.pos.z) / height;
+
+	// Slope'ы uv-атрибутов при интерполяции по боковым рёбрам.
+	float u_slope_vert_left = (v1.tex_coord.u - v0.tex_coord.u) / height;
+	float v_slope_vert_left = (v1.tex_coord.v - v0.tex_coord.v) / height;
+
+	float u_slope_vert_right = (v2.tex_coord.u - v0.tex_coord.u) / height;
+	float v_slope_vert_right = (v2.tex_coord.v - v0.tex_coord.v) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// Slope uv-атрибутов при интерполяции вдоль скан-линий (постоянный для всех скан-линий).
+	float u_slope_horiz = (u_slope_vert_right - u_slope_vert_left) / (slope_right_inv - slope_left_inv);
+	float v_slope_horiz = (v_slope_vert_right - v_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	int y_start = (v0.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v0.pos.y));
+
+	// Определяем y-координату последней скан-линии (следуем правилу top-left).
+	// NOTE: Если для текущего flat_bottom треугольника существует снизу смежный flat_top,
+	// то поскольку последняя скан-линия flat_bottom треугольника определяется по правой нижней координате,
+	// то первая скан-линия смежного flat_top треугольника должна определяться по правой верхней,
+	// чтобы не было ни пропуска скан-линии ни наложения.
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v0.pos.y;
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v0.pos.x + delta_y * slope_right_inv;
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+		float scan_line_start_u = v0.tex_coord.u + delta_y * u_slope_vert_left;
+		float scan_line_start_v = v0.tex_coord.v + delta_y * v_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z-атрибут начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		// NOTE: Интерполяция конца скан-линии не требуется, поскольку мы получим корректный z-атрибут
+		// естественным образом, итеративно интерполируясь вправо.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = scan_line_start_int - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+
+		// Также интерполируем uv-атрибуты на дельту округления до целого.
+		float cur_frag_u = scan_line_start_u;
+		float cur_frag_v = scan_line_start_v;
+		cur_frag_u += u_slope_horiz * scan_line_start_delta;
+		cur_frag_v += v_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer)) {
+				unsigned int tex_pixel_x = static_cast<unsigned int>(std::round(cur_frag_u * (texture.w - 1)));
+				unsigned int tex_pixel_y = static_cast<unsigned int>(std::round((1.0f - cur_frag_v) * (texture.h - 1)));
+				Color frag_color = get_texture_pixel_color(texture, tex_pixel_x, tex_pixel_y);
+
+				// Моделируем освещение.
+				std::uint8_t r_lighted = static_cast<std::uint8_t>(std::round(frag_color.r * light_intensity));
+				std::uint8_t g_lighted = static_cast<std::uint8_t>(std::round(frag_color.g * light_intensity));
+				std::uint8_t b_lighted = static_cast<std::uint8_t>(std::round(frag_color.b * light_intensity));
+				Color lighted_frag_color{ r_lighted, g_lighted, b_lighted, 255 };
+				set_pixel_color(x, y, lighted_frag_color, framebuffer);
+			}
+
+			cur_frag_z += z_slope_horiz;
+
+			cur_frag_u += u_slope_horiz;
+			cur_frag_v += v_slope_horiz;
+		}
+	}
+}
+
+void draw_flat_top_polygon_flat_shaded_textured_affine(Polygon polygon_screen, Texture texture, float light_intensity, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем верхние вершины по x по возрастанию.
+	if (v0.pos.x > v1.pos.x) {
+		std::swap(v0, v1);
+	}
+
+	float height = v2.pos.y - v1.pos.y; // Определяем высоту по правой верхней вершине.
+	float slope_left_inv = (v2.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v1.pos.x) / height;
+
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v2.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v1.pos.z) / height;
+
+	// Slope'ы uv-атрибутов при интерполяции по боковым рёбрам.
+	float u_slope_vert_left = (v2.tex_coord.u - v0.tex_coord.u) / height;
+	float v_slope_vert_left = (v2.tex_coord.v - v0.tex_coord.v) / height;
+
+	float u_slope_vert_right = (v2.tex_coord.u - v1.tex_coord.u) / height;
+	float v_slope_vert_right = (v2.tex_coord.v - v1.tex_coord.v) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// Slope uv-атрибутов при интерполяции вдоль скан-линий (постоянный для всех скан-линий).
+	float u_slope_horiz = (u_slope_vert_right - u_slope_vert_left) / (slope_right_inv - slope_left_inv);
+	float v_slope_horiz = (v_slope_vert_right - v_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// Клиппинг с верхней границей экрана.
+	// NOTE: Чтобы быть последовательными, ориентируемся на правую вершину, поскольку по ней определяем
+	// высоту и по ней же определяем y-координату первой скан-линии. Более того, по правой же вершине определяем
+	// для flat_bottom треугольника y-координату последней скан-линии.
+	int y_start = (v1.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v1.pos.y));
+
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v1.pos.y;
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v1.pos.x + delta_y * slope_right_inv;
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+		float scan_line_start_u = v0.tex_coord.u + delta_y * u_slope_vert_left;
+		float scan_line_start_v = v0.tex_coord.v + delta_y * v_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = scan_line_start_int - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+
+		// Также интерполируем uv-атрибуты на дельту округления до целого.
+		float cur_frag_u = scan_line_start_u;
+		float cur_frag_v = scan_line_start_v;
+		cur_frag_u += u_slope_horiz * scan_line_start_delta;
+		cur_frag_v += v_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer)) {
+				unsigned int tex_pixel_x = static_cast<unsigned int>(std::round(cur_frag_u * (texture.w - 1)));
+				unsigned int tex_pixel_y = static_cast<unsigned int>(std::round((1.0f - cur_frag_v) * (texture.h - 1)));
+				Color frag_color = get_texture_pixel_color(texture, tex_pixel_x, tex_pixel_y);
+				// Моделируем освещение.
+				std::uint8_t r_lighted = static_cast<std::uint8_t>(std::round(frag_color.r * light_intensity));
+				std::uint8_t g_lighted = static_cast<std::uint8_t>(std::round(frag_color.g * light_intensity));
+				std::uint8_t b_lighted = static_cast<std::uint8_t>(std::round(frag_color.b * light_intensity));
+				Color lighted_frag_color{ r_lighted, g_lighted, b_lighted, 255 };
+				set_pixel_color(x, y, lighted_frag_color, framebuffer);
+			}
+
+			cur_frag_z += z_slope_horiz;
+
+			cur_frag_u += u_slope_horiz;
+			cur_frag_v += v_slope_horiz;
+		}
+	}
+}
+
+void draw_flat_bottom_polygon_flat_shaded_textured_affine_no_crack(Polygon polygon_screen, float inv_slope, Texture texture, float light_intensity, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем нижние вершины по x по возрастанию.
+	bool v1_v2_swapped = false;
+	if (v1.pos.x > v2.pos.x) {
+		std::swap(v1, v2);
+		v1_v2_swapped = true;
+	}
+
+	float height = v2.pos.y - v0.pos.y; // Определяем высоту по правой нижней вершине.
+	float slope_left_inv = (v1.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v0.pos.x) / height;
+	if (v1_v2_swapped) {
+		slope_right_inv = inv_slope;
+	}
+	else {
+		slope_left_inv = inv_slope;
+	}
+
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v1.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v0.pos.z) / height;
+
+	// Slope'ы uv-атрибутов при интерполяции по боковым рёбрам.
+	float u_slope_vert_left = (v1.tex_coord.u - v0.tex_coord.u) / height;
+	float v_slope_vert_left = (v1.tex_coord.v - v0.tex_coord.v) / height;
+
+	float u_slope_vert_right = (v2.tex_coord.u - v0.tex_coord.u) / height;
+	float v_slope_vert_right = (v2.tex_coord.v - v0.tex_coord.v) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// Slope uv-атрибутов при интерполяции вдоль скан-линий (постоянный для всех скан-линий).
+	float u_slope_horiz = (u_slope_vert_right - u_slope_vert_left) / (slope_right_inv - slope_left_inv);
+	float v_slope_horiz = (v_slope_vert_right - v_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	int y_start = (v0.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v0.pos.y));
+
+	// Определяем y-координату последней скан-линии (следуем правилу top-left).
+	// NOTE: Если для текущего flat_bottom треугольника существует снизу смежный flat_top,
+	// то поскольку последняя скан-линия flat_bottom треугольника определяется по правой нижней координате,
+	// то первая скан-линия смежного flat_top треугольника должна определяться по правой верхней,
+	// чтобы не было ни пропуска скан-линии ни наложения.
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v0.pos.y;
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v0.pos.x + delta_y * slope_right_inv;
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+		float scan_line_start_u = v0.tex_coord.u + delta_y * u_slope_vert_left;
+		float scan_line_start_v = v0.tex_coord.v + delta_y * v_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z-атрибут начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		// NOTE: Интерполяция конца скан-линии не требуется, поскольку мы получим корректный z-атрибут
+		// естественным образом, итеративно интерполируясь вправо.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = scan_line_start_int - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+
+		// Также интерполируем uv-атрибуты на дельту округления до целого.
+		float cur_frag_u = scan_line_start_u;
+		float cur_frag_v = scan_line_start_v;
+		cur_frag_u += u_slope_horiz * scan_line_start_delta;
+		cur_frag_v += v_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer)) {
+				unsigned int tex_pixel_x = static_cast<unsigned int>(std::round(cur_frag_u * (texture.w - 1)));
+				unsigned int tex_pixel_y = static_cast<unsigned int>(std::round((1.0f - cur_frag_v) * (texture.h - 1)));
+				Color frag_color = get_texture_pixel_color(texture, tex_pixel_x, tex_pixel_y);
+
+				// Моделируем освещение.
+				std::uint8_t r_lighted = static_cast<std::uint8_t>(std::round(frag_color.r * light_intensity));
+				std::uint8_t g_lighted = static_cast<std::uint8_t>(std::round(frag_color.g * light_intensity));
+				std::uint8_t b_lighted = static_cast<std::uint8_t>(std::round(frag_color.b * light_intensity));
+				Color lighted_frag_color{ r_lighted, g_lighted, b_lighted, 255 };
+				set_pixel_color(x, y, lighted_frag_color, framebuffer);
+			}
+
+			cur_frag_z += z_slope_horiz;
+
+			cur_frag_u += u_slope_horiz;
+			cur_frag_v += v_slope_horiz;
+		}
+	}
+}
+
+void draw_flat_top_polygon_flat_shaded_textured_affine_no_crack(Polygon polygon_screen, float inv_slope, const Vertex& v_top, Texture texture, float light_intensity, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем верхние вершины по x по возрастанию.
+	bool v0_v1_swapped = false;
+	if (v0.pos.x > v1.pos.x) {
+		std::swap(v0, v1);
+		v0_v1_swapped = true;
+	}
+
+	float height = v2.pos.y - v1.pos.y; // Определяем высоту по правой верхней вершине.
+	float slope_left_inv = (v2.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v1.pos.x) / height;
+	if (v0_v1_swapped) {
+		slope_right_inv = inv_slope;
+	}
+	else {
+		slope_left_inv = inv_slope;
+	}
+
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v2.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v1.pos.z) / height;
+
+	// Slope'ы uv-атрибутов при интерполяции по боковым рёбрам.
+	float u_slope_vert_left = (v2.tex_coord.u - v0.tex_coord.u) / height;
+	float v_slope_vert_left = (v2.tex_coord.v - v0.tex_coord.v) / height;
+
+	float u_slope_vert_right = (v2.tex_coord.u - v1.tex_coord.u) / height;
+	float v_slope_vert_right = (v2.tex_coord.v - v1.tex_coord.v) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// Slope uv-атрибутов при интерполяции вдоль скан-линий (постоянный для всех скан-линий).
+	float u_slope_horiz = (u_slope_vert_right - u_slope_vert_left) / (slope_right_inv - slope_left_inv);
+	float v_slope_horiz = (v_slope_vert_right - v_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// Клиппинг с верхней границей экрана.
+	// NOTE: Чтобы быть последовательными, ориентируемся на правую вершину, поскольку по ней определяем
+	// высоту и по ней же определяем y-координату первой скан-линии. Более того, по правой же вершине определяем
+	// для flat_bottom треугольника y-координату последней скан-линии.
+	int y_start = (v1.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v1.pos.y));
+
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v1.pos.y;
+
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v1.pos.x + delta_y * slope_right_inv;
+		float true_delta = y - v_top.pos.y;
+		// NOTE: Это и есть фикс последнего бага с дырками на границе смежных треугольников.
+		if (v0_v1_swapped) {
+			scan_line_end = v_top.pos.x + true_delta * slope_right_inv;
+		}
+		else {
+			scan_line_start = v_top.pos.x + true_delta * slope_left_inv;
+		}
+
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+		float scan_line_start_u = v0.tex_coord.u + delta_y * u_slope_vert_left;
+		float scan_line_start_v = v0.tex_coord.v + delta_y * v_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = scan_line_start_int - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+
+		// Также интерполируем uv-атрибуты на дельту округления до целого.
+		float cur_frag_u = scan_line_start_u;
+		float cur_frag_v = scan_line_start_v;
+		cur_frag_u += u_slope_horiz * scan_line_start_delta;
+		cur_frag_v += v_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer)) {
+				unsigned int tex_pixel_x = static_cast<unsigned int>(std::round(cur_frag_u * (texture.w - 1)));
+				unsigned int tex_pixel_y = static_cast<unsigned int>(std::round((1.0f - cur_frag_v) * (texture.h - 1)));
+				Color frag_color = get_texture_pixel_color(texture, tex_pixel_x, tex_pixel_y);
+				// Моделируем освещение.
+				std::uint8_t r_lighted = static_cast<std::uint8_t>(std::round(frag_color.r * light_intensity));
+				std::uint8_t g_lighted = static_cast<std::uint8_t>(std::round(frag_color.g * light_intensity));
+				std::uint8_t b_lighted = static_cast<std::uint8_t>(std::round(frag_color.b * light_intensity));
+				Color lighted_frag_color{ r_lighted, g_lighted, b_lighted, 255 };
+				set_pixel_color(x, y, lighted_frag_color, framebuffer);
+			}
+
+			cur_frag_z += z_slope_horiz;
+
+			cur_frag_u += u_slope_horiz;
+			cur_frag_v += v_slope_horiz;
+		}
+	}
+}
+
+Color get_texture_pixel_color(Texture texture, int pixel_x, int pixel_y) {
+	int bytes_per_pixel{ 4 };
+	int rgba_index = (texture.w * pixel_y + pixel_x) * bytes_per_pixel;
+	std::uint8_t r{ texture.rgba_array[rgba_index] };
+	std::uint8_t g{ texture.rgba_array[rgba_index + 1] };
+	std::uint8_t b{ texture.rgba_array[rgba_index + 2] };
+	std::uint8_t a{ texture.rgba_array[rgba_index + 3] };
+	return Color{ r, g, b, a };
+}
+
+void draw_polygon_solid(Polygon polygon_screen, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем вершины по y по возрастанию.
+	if (v0.pos.y > v1.pos.y) {
+		std::swap(v0, v1);
+	}
+	if (v1.pos.y > v2.pos.y) {
+		std::swap(v1, v2);
+	}
+	if (v0.pos.y > v1.pos.y) {
+		std::swap(v0, v1);
+	}
+
+	// Trivial reject по верхней/нижней границе.
+	// NOTE: Нет смысла исключать ноль для верхней границы, поскольку в итоге все-равно
+	// получим ceil(0)-1 для y-координаты нижней скан-линии и растеризации не будет.
+	// Для нижней же границы ноль нужно исключить, чтобы не было пропуска пикселов по нижней стороне смежного треугольника.
+	if (v2.pos.y <= 0.0f || v0.pos.y > (framebuffer.h - 1)) {
+		return;
+	}
+
+	// Trivial reject по левой границе.
+	// NOTE: Нет смысла исключать ноль для левой границы, поскольку в итоге все-равно
+	// получим ceil(0)-1 для концов всех скан-линий и растеризации не будет.
+	if ((v0.pos.x <= 0.0f) && (v1.pos.x <= 0.0f) && (v2.pos.x <= 0.0f)) {
+		return;
+	}
+
+	// Trivial reject по правой границе.
+	// NOTE: Важно исключить ноль, чтобы не было пропуска пикселов по правой стороне смежного треугольника.
+	if ((v0.pos.x > (framebuffer.w - 1)) && (v1.pos.x > (framebuffer.w - 1)) && (v2.pos.x > (framebuffer.w - 1))) {
+		return;
+	}
+
+	// Классифицируем треугольник.
+	// NOTE: Проверяем на точное равенство, а не через epsilon, поскольку в противном случае
+	// возможна некорректная растеризация: пропуск пиксела или двойная растеризация одного и того же
+	// пиксела для двух смежных треугольников.
+	bool flat_bottom = (v1.pos.y == v2.pos.y);
+	bool flat_top = (v0.pos.y == v1.pos.y);
+	if (flat_bottom) {
+		draw_flat_bottom_polygon_solid(Polygon{ {v0, v1, v2}, polygon_screen.albedo_color }, framebuffer, z_buffer);
+	}
+	else if (flat_top) {
+		draw_flat_top_polygon_solid(Polygon{ {v0, v1, v2}, polygon_screen.albedo_color }, framebuffer, z_buffer);
+	}
+	else { // Разделяем треугольник на flat_bottom и flat_top.
+		float inv_slope = (v2.pos.x - v0.pos.x) / (v2.pos.y - v0.pos.y); // Наклон самого длинного ребра.
+		float height_top_triangle = v1.pos.y - v0.pos.y;
+
+		// Точка пересечения на длинном ребре при разделении треугольников.
+		float intersect_x = v0.pos.x + height_top_triangle * inv_slope;
+		float intersect_y = v1.pos.y;
+
+		// Определяем z-атрибут точки пересечения, интерполируя вдоль самого длинного ребра.
+		float z_slope_vert = (v2.pos.z - v0.pos.z) / (v2.pos.y - v0.pos.y);
+		float intersect_z = v0.pos.z + (height_top_triangle * z_slope_vert);
+
+		Vertex intersect{ {intersect_x, intersect_y, intersect_z} };
+
+		draw_flat_bottom_polygon_solid_no_crack(Polygon{ {v0, intersect, v1}, polygon_screen.albedo_color }, inv_slope, framebuffer, z_buffer);
+		draw_flat_top_polygon_solid_no_crack(Polygon{ {intersect, v1, v2}, polygon_screen.albedo_color }, inv_slope, v0, framebuffer, z_buffer);
+	}
+}
+
+void draw_flat_bottom_polygon_solid(Polygon polygon_screen, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем нижние вершины по x по возрастанию.
+	if (v1.pos.x > v2.pos.x) {
+		std::swap(v1, v2);
+	}
+
+	float height = v2.pos.y - v0.pos.y; // Определяем высоту по правой нижней вершине.
+	float slope_left_inv = (v1.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v0.pos.x) / height;
+	
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v1.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v0.pos.z) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	int y_start = (v0.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v0.pos.y));
+
+	// Определяем y-координату последней скан-линии (следуем правилу top-left).
+	// NOTE: Если для текущего flat_bottom треугольника существует снизу смежный flat_top,
+	// то поскольку последняя скан-линия flat_bottom треугольника определяется по правой нижней координате,
+	// то первая скан-линия смежного flat_top треугольника должна определяться по правой верхней,
+	// чтобы не было ни пропуска скан-линии ни наложения.
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v0.pos.y;
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v0.pos.x + delta_y * slope_right_inv;
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z-атрибут начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		// NOTE: Интерполяция конца скан-линии не требуется, поскольку мы получим корректный z-атрибут
+		// естественным образом, итеративно интерполируясь вправо.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = scan_line_start_int - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer)) {
+				set_pixel_color(x, y, polygon_screen.albedo_color, framebuffer);
+			}
+
+			cur_frag_z += z_slope_horiz;
+		}
+	}
+}
+
+void draw_flat_bottom_polygon_solid_no_crack(Polygon polygon_screen, float inv_slope, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем нижние вершины по x по возрастанию.
+	bool v1_v2_swapped = false;
+	if (v1.pos.x > v2.pos.x) {
+		std::swap(v1, v2);
+		v1_v2_swapped = true;
+	}
+
+	float height = v2.pos.y - v0.pos.y; // Определяем высоту по правой нижней вершине.
+	float slope_left_inv = (v1.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v0.pos.x) / height;
+	// CRACKFIX2: Определяем, какая из сторон является самой длинной и используем для вычислений оригинальный slope,
+	// вычисленный по всей длине стороны, вместо вычисления относительно точки сечения, иначе, при отрисовке треугольника
+	// смежного по длинной стороне, мы можем получить численно другой slope, а это приведёт к различным значениям начала и конца
+	// скан-линий для смежных треугольников и может привести к пропуску или наложению пикселей.
+	if (v1_v2_swapped) {
+		slope_right_inv = inv_slope;
+	}
+	else {
+		slope_left_inv = inv_slope;
+	}
+
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v1.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v0.pos.z) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	int y_start = (v0.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v0.pos.y));
+
+	// Определяем y-координату последней скан-линии (следуем правилу top-left).
+	// NOTE: Если для текущего flat_bottom треугольника существует снизу смежный flat_top,
+	// то поскольку последняя скан-линия flat_bottom треугольника определяется по правой нижней координате,
+	// то первая скан-линия смежного flat_top треугольника должна определяться по правой верхней,
+	// чтобы не было ни пропуска скан-линии ни наложения.
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	// CRACKFIX1: Мы здесь ушли от итеративного приращения slope к x при вычислении начала/конца следующей скан-линии,
+	// потому что это приводило к накоплению большой ошибки и пропуску пиксела.
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v0.pos.y;
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v0.pos.x + delta_y * slope_right_inv;
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z-атрибут начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		// NOTE: Интерполяция конца скан-линии не требуется, поскольку мы получим корректный z-атрибут
+		// естественным образом, итеративно интерполируясь вправо.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = scan_line_start_int - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer)) {
+				set_pixel_color(x, y, polygon_screen.albedo_color, framebuffer);
+			}
+
+			cur_frag_z += z_slope_horiz;
+		}
+	}
+}
+
+void draw_flat_top_polygon_solid(Polygon polygon_screen, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем верхние вершины по x по возрастанию.
+	if (v0.pos.x > v1.pos.x) {
+		std::swap(v0, v1);
+	}
+
+	float height = v2.pos.y - v1.pos.y; // Определяем высоту по правой верхней вершине.
+	float slope_left_inv = (v2.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v1.pos.x) / height;
+
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v2.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v1.pos.z) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// NOTE: Чтобы быть последовательными, ориентируемся на правую вершину, поскольку по ней определяем
+	// высоту и по ней же определяем y-координату первой скан-линии. Более того, по правой же вершине определяем
+	// для flat_bottom треугольника y-координату последней скан-линии.
+	int y_start = (v1.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v1.pos.y));
+
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v1.pos.y;
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v1.pos.x + delta_y * slope_right_inv;
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = static_cast<float>(scan_line_start_int) - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer))
+				set_pixel_color(x, y, polygon_screen.albedo_color, framebuffer);
+
+			cur_frag_z += z_slope_horiz;
+		}
+	}
+}
+
+// NOTE: Если свопа не было, то v0 всегда является точкой сечения самой длинной стороны.
+// То есть, если свопа нет, то самая длинная сторона - левая, иначе - правая.
+// Соответственно, при спуске по Y вниз мы вычисляем начало (если самая длинная сторона - левая) или
+// конец (если самая длинная сторона - правая) текущей скан-линии опираясь на v_top.
+// В идеале мы должны по аналогии таким образом пересчитать и z и uv, но нас волнуют в первую очередь видимые дырки при рендеринге,
+// поэтому z и uv оставляем с погрешностями, которые визуально заметны не будут, тем более, учитывая, что у нас всё-равно афинное текстурирование,
+// которое и так даёт искажение.
+void draw_flat_top_polygon_solid_no_crack(Polygon polygon_screen, float inv_slope, const Vertex& v_top, Framebuffer& framebuffer, ZBuffer& z_buffer) {
+	Vertex v0 = polygon_screen.vertices[0];
+	Vertex v1 = polygon_screen.vertices[1];
+	Vertex v2 = polygon_screen.vertices[2];
+
+	// Сортируем верхние вершины по x по возрастанию.
+	bool v0_v1_swapped = false;
+	if (v0.pos.x > v1.pos.x) {
+		std::swap(v0, v1);
+		v0_v1_swapped = true;
+	}
+
+	float height = v2.pos.y - v1.pos.y; // Определяем высоту по правой верхней вершине.
+	float slope_left_inv = (v2.pos.x - v0.pos.x) / height;
+	float slope_right_inv = (v2.pos.x - v1.pos.x) / height;
+	if (v0_v1_swapped) {
+		slope_right_inv = inv_slope;
+	}
+	else {
+		slope_left_inv = inv_slope;
+	}
+
+	// Slope'ы z-атрибутов при интерполяции по боковым рёбрам.
+	float z_slope_vert_left = (v2.pos.z - v0.pos.z) / height;
+	float z_slope_vert_right = (v2.pos.z - v1.pos.z) / height;
+
+	// Slope z-атрибута при интерполяции вдоль скан-линий.
+	// NOTE: Постоянный для всех скан-линий.
+	float z_slope_horiz = (z_slope_vert_right - z_slope_vert_left) / (slope_right_inv - slope_left_inv);
+
+	// NOTE: Чтобы быть последовательными, ориентируемся на правую вершину, поскольку по ней определяем
+	// высоту и по ней же определяем y-координату первой скан-линии. Более того, по правой же вершине определяем
+	// для flat_bottom треугольника y-координату последней скан-линии.
+	int y_start = (v1.pos.y < 0.0f) ? 0 : static_cast<int>(std::ceil(v1.pos.y));
+
+	int y_end = static_cast<int>(std::ceil(v2.pos.y) - 1);
+	if (v2.pos.y > framebuffer.h) {
+		y_end = framebuffer.h - 1;
+	}
+
+	for (int y = y_start; y <= y_end; y++) {
+		float delta_y = y - v1.pos.y;
+
+		float scan_line_start = v0.pos.x + delta_y * slope_left_inv;
+		float scan_line_end = v1.pos.x + delta_y * slope_right_inv;
+		float true_delta = y - v_top.pos.y;
+		// CRACKFIX3: Для двух смежных треугольников мы вычисляем начало/конец скан-линий
+		// отталкиваясь не от точек сечений (которые могут различаться для двух смежных треугольников общего случая)
+		// а от самой верхней точки. В итоге у нас не только формула совпадает при отрисовке смежных треугольников,
+		// но и численный результат этой формулы, несмотря на вычисления в числах с плавающей точкой.
+		// Это работает, потому что числовые аргументы при отрисовке двух смежных треугольников в точности совпадают).
+		if (v0_v1_swapped) {
+			scan_line_end = v_top.pos.x + true_delta * slope_right_inv;
+		}
+		else {
+			scan_line_start = v_top.pos.x + true_delta * slope_left_inv;
+		}
+
+		float scan_line_start_z = v0.pos.z + delta_y * z_slope_vert_left;
+
+		// Вычисляем целочисленные значения начала и конца текущей скан-линии, следуя правилу top-left.
+		// Если начало скан-линии находится за левой границей окна, прижимаем к нулю.
+		// Если конец скан-линии находится за правой границей окна плюс один пиксел, то прижимаем к правой границе.
+		int scan_line_start_int = (scan_line_start < 0.0f) ? 0 : static_cast<int>(std::ceil(scan_line_start));
+		int scan_line_end_int = (scan_line_end > framebuffer.w) ? (framebuffer.w - 1) : static_cast<int>(std::ceil(scan_line_end) - 1);
+
+		// Интерполируем z начала текущей скан-линии с учетом перехода к целочисленным координатам.
+		float cur_frag_z = scan_line_start_z;
+		float scan_line_start_delta = static_cast<float>(scan_line_start_int) - scan_line_start;
+		cur_frag_z += z_slope_horiz * scan_line_start_delta;
+		for (int x = scan_line_start_int; x <= scan_line_end_int; x++) {
+			if (perform_depth_test(x, y, cur_frag_z, z_buffer))
+				set_pixel_color(x, y, polygon_screen.albedo_color, framebuffer);
+
+			cur_frag_z += z_slope_horiz;
+		}
+	}
+}
+
+void rasterize_polygons_flat_shaded(const std::vector<Polygon>& polygons, const Light& light, Framebuffer& framebuffer, ZBuffer& z_buffer, const MVP& mvp) {
+	Mat4f viewport = Mat4f::create_viewport(framebuffer.w, framebuffer.h);
+
+	std::vector<Polygon> cull_clip_passed_polygons;
+	for (Polygon polygon : polygons) {
+		for (Vertex& vertex : polygon.vertices) {
+			Vec4f pos(vertex.pos);
+			vertex.pos = Vec3f(mvp.view * mvp.model * pos);
+		}
+
+		// Frustum culling.
+		enum FrustumPlaneBit {
+			left,
+			right,
+			bottom,
+			top,
+			near,
+			far
+		};
+		float ratio = static_cast<float>(framebuffer.w) / framebuffer.h;
+		float fov_vert_half_rad = mvp.fov_vert_half_rad;
+		float d = 1.0f / std::tan(fov_vert_half_rad);
+		float frustum_x_slope_left = ratio / d;
+		float frustum_x_slope_right = -ratio / d;
+		float frustum_y_slope_bottom = 1.0f / d;
+		float frustum_y_slope_top = -1.0f / d;
+		std::array<std::bitset<6>, 3> region_codes{};
+		for (int i = 0; i < polygon.vertices.size(); ++i) {
+			// Куллинг с левой плоскостью фрустума.
+			float left_lim = polygon.vertices[i].pos.z * frustum_x_slope_left;
+			region_codes[i].set(FrustumPlaneBit::left, polygon.vertices[i].pos.x <= left_lim);
+
+			// Куллинг с правой плоскостью фрустума.
+			float right_lim = polygon.vertices[i].pos.z * frustum_x_slope_right;
+			region_codes[i].set(FrustumPlaneBit::right, polygon.vertices[i].pos.x >= right_lim);
+
+			// Куллинг с нижней плоскостью фрустума.
+			float bottom_lim = polygon.vertices[i].pos.z * frustum_y_slope_bottom;
+			region_codes[i].set(FrustumPlaneBit::bottom, polygon.vertices[i].pos.y <= bottom_lim);
+
+			// Куллинг с верхней плоскостью фрустума.
+			float top_lim = polygon.vertices[i].pos.z * frustum_y_slope_top;
+			region_codes[i].set(FrustumPlaneBit::top, polygon.vertices[i].pos.y >= top_lim);
+
+			// Куллинг с дальней плоскосотью фрустума.
+			float far_lim = mvp.far_plane;
+			region_codes[i].set(FrustumPlaneBit::far, polygon.vertices[i].pos.z <= far_lim);
+
+			// Куллинг с ближней плоскосотью фрустума.
+			float near_lim = mvp.near_plane;
+			region_codes[i].set(FrustumPlaneBit::near, polygon.vertices[i].pos.z >= near_lim);
+		}
+		// Все три вершины находятся за пределами общей плоскости - отбрасываем полигон.
+		if ((region_codes[0] & region_codes[1] & region_codes[2]).any())
+			continue;
+
+		// Near plane clipping.
+		int in = 0;
+		int out = 0;
+		int on_plane = 0;
+		for (Vertex& vertex : polygon.vertices) {
+			if (vertex.pos.z > mvp.near_plane)
+				++out;
+			else if (vertex.pos.z < mvp.near_plane)
+				++in;
+			else
+				++on_plane;
+		}
+		Vertex v0 = polygon.vertices[0];
+		Vertex v1 = polygon.vertices[1];
+		Vertex v2 = polygon.vertices[2];
+		// Приводим названия к каноническому виду (упорядочиваем названия).
+		if (in == 1 && out == 2) {
+			if (v1.pos.z < mvp.near_plane) {
+				std::swap(v0, v1);
+				std::swap(v1, v2);
+			}
+			else if (v2.pos.z < mvp.near_plane) {
+				std::swap(v0, v2);
+				std::swap(v1, v2);
+			}
+
+			float t1 = (mvp.near_plane - v0.pos.z) / (v1.pos.z - v0.pos.z);
+			float t2 = (mvp.near_plane - v0.pos.z) / (v2.pos.z - v0.pos.z);
+
+			Vec3f dir1 = (v1.pos - v0.pos);
+			Vec3f dir2 = (v2.pos - v0.pos);
+
+			Vec3f v1_intersect_pos = v0.pos + dir1 * t1;
+			Vec3f v2_intersect_pos = v0.pos + dir2 * t2;
+
+			// Клиппинг текстурных координат.
+			float full_len1 = (v1.pos - v0.pos).length();
+			float u1_slope = (v1.tex_coord.u - v0.tex_coord.u) / full_len1;
+			float v1_slope = (v1.tex_coord.v - v0.tex_coord.v) / full_len1;
+			float clipped_len1 = (v1_intersect_pos - v0.pos).length();
+			float u1_clipped = v0.tex_coord.u + (clipped_len1 * u1_slope);
+			float v1_clipped = v0.tex_coord.v + (clipped_len1 * v1_slope);
+
+			float full_len2 = (v2.pos - v0.pos).length();
+			float u2_slope = (v2.tex_coord.u - v0.tex_coord.u) / full_len2;
+			float v2_slope = (v2.tex_coord.v - v0.tex_coord.v) / full_len2;
+			float clipped_len2 = (v2_intersect_pos - v0.pos).length();
+			float u2_clipped = v0.tex_coord.u + (clipped_len2 * u2_slope);
+			float v2_clipped = v0.tex_coord.v + (clipped_len2 * v2_slope);
+
+			Vertex v1_intersect{ v1_intersect_pos, TexCoord{u1_clipped, v1_clipped} };
+			Vertex v2_intersect{ v2_intersect_pos, TexCoord{u2_clipped, v2_clipped} };
+
+			polygon.vertices[0] = v0;
+			polygon.vertices[1] = v1_intersect;
+			polygon.vertices[2] = v2_intersect;
+			cull_clip_passed_polygons.push_back(polygon);
+		}
+		else if (in == 2 && out == 1) {
+			if (v0.pos.z > mvp.near_plane) {
+				std::swap(v0, v2);
+				std::swap(v0, v1);
+			}
+			else if (v1.pos.z > mvp.near_plane) {
+				std::swap(v1, v2);
+				std::swap(v0, v1);
+			}
+
+			float t0 = (mvp.near_plane - v0.pos.z) / (v2.pos.z - v0.pos.z);
+			float t1 = (mvp.near_plane - v1.pos.z) / (v2.pos.z - v1.pos.z);
+
+			Vec3f dir0 = (v2.pos - v0.pos);
+			Vec3f dir1 = (v2.pos - v1.pos);
+
+			Vec3f v0_intersect_pos = v0.pos + dir0 * t0;
+			Vec3f v1_intersect_pos = v1.pos + dir1 * t1;
+
+			// Клиппинг текстурных координат.
+			float full_len0 = (v2.pos - v0.pos).length();
+			float u0_slope = (v2.tex_coord.u - v0.tex_coord.u) / full_len0;
+			float v0_slope = (v2.tex_coord.v - v0.tex_coord.v) / full_len0;
+			float clipped_len0 = (v0_intersect_pos - v0.pos).length();
+			float u0_clipped = v0.tex_coord.u + (clipped_len0 * u0_slope);
+			float v0_clipped = v0.tex_coord.v + (clipped_len0 * v0_slope);
+
+			float full_len1 = (v2.pos - v1.pos).length();
+			float u1_slope = (v2.tex_coord.u - v1.tex_coord.u) / full_len1;
+			float v1_slope = (v2.tex_coord.v - v1.tex_coord.v) / full_len1;
+			float clipped_len1 = (v1_intersect_pos - v1.pos).length();
+			float u1_clipped = v1.tex_coord.u + (clipped_len1 * u1_slope);
+			float v1_clipped = v1.tex_coord.v + (clipped_len1 * v1_slope);
+
+			Vertex v0_intersect{ v0_intersect_pos, TexCoord{u0_clipped, v0_clipped} };
+			Vertex v1_intersect{ v1_intersect_pos, TexCoord{u1_clipped, v1_clipped} };
+
+			polygon.vertices[0] = v0;
+			polygon.vertices[1] = v1;
+			polygon.vertices[2] = v1_intersect;
+			cull_clip_passed_polygons.push_back(polygon);
+
+			Polygon new_poly{ {v0, v1_intersect, v0_intersect}, polygon.albedo_color };
+			cull_clip_passed_polygons.push_back(new_poly);
+		}
+		else if (in == 1 && out == 1 && on_plane == 1) {
+			if (v1.pos.z < mvp.near_plane) {
+				std::swap(v0, v1);
+				std::swap(v1, v2);
+			}
+			else if (v2.pos.z < mvp.near_plane) {
+				std::swap(v0, v2);
+				std::swap(v2, v1);
+			}
+
+			// Определяем вершину, лежащую за пределами ближней плоскости отсечения.
+			Vertex v_out = (v1.pos.z > v2.pos.z) ? v1 : v2;
+			float t_out = (mvp.near_plane - v0.pos.z) / (v_out.pos.z - v0.pos.z);
+			Vec3f dir_out = (v_out.pos - v0.pos);
+			Vec3f v_out_intersect_pos = v0.pos + dir_out * t_out;
+
+			// Клиппинг текстурных координат.
+			float full_len = (v_out.pos - v0.pos).length();
+			float u_slope = (v_out.tex_coord.u - v0.tex_coord.u) / full_len;
+			float v_slope = (v_out.tex_coord.v - v0.tex_coord.v) / full_len;
+			float clipped_len = (v_out_intersect_pos - v0.pos).length();
+			float u_clipped = v0.tex_coord.u + (clipped_len * u_slope);
+			float v_clipped = v0.tex_coord.v + (clipped_len * v_slope);
+
+			Vertex v_out_intersect{ v_out_intersect_pos, TexCoord{u_clipped, v_clipped} };
+
+			polygon.vertices[0] = v0;
+			if (v1.pos.z > v2.pos.z) {
+				polygon.vertices[1] = v_out_intersect;
+				polygon.vertices[2] = v2;
+			}
+			else {
+				polygon.vertices[2] = v_out_intersect;
+				polygon.vertices[1] = v1;
+			}
+			cull_clip_passed_polygons.push_back(polygon);
+		}
+		// Полигон находится целиком внутри фрустума.
+		else {
+			cull_clip_passed_polygons.push_back(polygon);
+		}
+	}
+
+	for (Polygon polygon : cull_clip_passed_polygons) {
+		// Вычисляем нормаль к полигону.
+		const Vertex& v0 = polygon.vertices[0];
+		const Vertex& v1 = polygon.vertices[1];
+		const Vertex& v2 = polygon.vertices[2];
+		const Vec3f edge1 = v1.pos - v0.pos;
+		const Vec3f edge2 = v2.pos - v0.pos;
+		const Vec3f polygon_normal = Vec3f::cross(edge1, edge2).get_normalized();
+
+		// Переводим все вершины полигона в NDC.
+		for (auto& vertex : polygon.vertices) {
+			Vec4f pos{ vertex.pos };
+
+			Vec4f pos_clip = mvp.proj * pos;
+			Vec4f pos_ndc = pos_clip / pos_clip.w;
+			vertex.pos = Vec3f{ pos_ndc };
+		}
+
+		// Backface culling.
+		// NOTE: Выполняем в NDC, поскольку фактически параллельный полигон
+		// после перспективного преобразования может оказаться видимым на проективной плоскости (если он не лежит в середине фрустума).
+		// Если же мы сделаем куллинг в исходном пространстве, то такой полигон будет отброшен и мы увидим дыру в геометрии.
+		Vec3f _edge1 = polygon.vertices[1].pos - polygon.vertices[0].pos;
+		Vec3f _edge2 = polygon.vertices[2].pos - polygon.vertices[0].pos;
+		Vec3f _polygon_normal = Vec3f::cross(_edge1, _edge2).get_normalized();
+		// NOTE: Возможно, стоит добавить сравнение с каким-то положительным эпсилон.
+		float dot = Vec3f::dot(_polygon_normal, Vec3f{ 0.0f, 0.0f, 1.0f });
+		if (dot <= 0.0f) {
+			continue;
+		}
+
+		std::vector<Vertex> vertices_screen;
+		for (const auto& vertex : polygon.vertices) {
+			Vec4f pos_ndc(vertex.pos);
+
+			Vec4f pos_screen = viewport * pos_ndc;
+
+			vertices_screen.push_back(Vertex{ Vec3f{pos_screen}, vertex.tex_coord });
+		}
+
+		// Моделируем освещение
+		float light_intensity = std::max(0.0f, Vec3f::dot(polygon_normal, -light.dir));
+		std::uint8_t& r = polygon.albedo_color.r;
+		std::uint8_t& g = polygon.albedo_color.g;
+		std::uint8_t& b = polygon.albedo_color.b;
+		std::uint8_t r_lighted = static_cast<std::uint8_t>(std::round(r * light_intensity));
+		std::uint8_t g_lighted = static_cast<std::uint8_t>(std::round(g * light_intensity));
+		std::uint8_t b_lighted = static_cast<std::uint8_t>(std::round(b * light_intensity));
+		Color lighted_color{ r_lighted, g_lighted, b_lighted, 255 };
+
+		Polygon polygon_screen{ {vertices_screen[0], vertices_screen[1], vertices_screen[2]}, lighted_color, polygon_normal };
+		draw_polygon_solid(polygon_screen, framebuffer, z_buffer);
+	}
+}
+
+bool perform_depth_test(int frag_x, int frag_y, float frag_z, ZBuffer& z_buffer) {
+	const int index = z_buffer.w * frag_y + frag_x;
+	if (frag_z < z_buffer.depth_array[index]) {
+		z_buffer.depth_array[index] = frag_z;
+		return true;
+	}
+
+	return false;
+}
+
+void set_pixel_color(int x, int y, Color color, Framebuffer& framebuffer) {
+	const int index = (y * framebuffer.w + x) * 4;
+
+	framebuffer.rgba_array[index] = color.r;
+	framebuffer.rgba_array[index + 1] = color.g;
+	framebuffer.rgba_array[index + 2] = color.b;
+	framebuffer.rgba_array[index + 3] = color.a;
+}
+
+void clear_framebuffer(Color color, Framebuffer& framebuffer) {
+	for (size_t i = 0; i < framebuffer.rgba_array.size(); i += 4) {
+		framebuffer.rgba_array[i] = color.r;
+		framebuffer.rgba_array[i + 1] = color.g;
+		framebuffer.rgba_array[i + 2] = color.b;
+		framebuffer.rgba_array[i + 3] = color.a;
+	}
+}
+
+void clear_z_buffer(float depth_value, ZBuffer& z_buffer) {
+	std::ranges::fill(z_buffer.depth_array, 1.0f);
+}
