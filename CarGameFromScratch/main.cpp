@@ -114,7 +114,7 @@ int main() {
         std::chrono::duration<float> elapsed_seconds = high_res_clock::now() - measure_start;
         frame_count++;
         if (elapsed_seconds.count() >= 1.0f) {
-            window.setTitle(std::format("Vehicle Physics Sandbox  FPS: {}", static_cast<int>(frame_count / elapsed_seconds.count())));
+            window.setTitle(std::format("Car Game From Scratch | FPS: {}", static_cast<int>(frame_count / elapsed_seconds.count())));
             frame_count = 0;
             measure_start = high_res_clock::now();
         }
