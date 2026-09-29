@@ -97,6 +97,7 @@
   <ItemGroup>
     <ClInclude Include="graphics.h" />
     <ClInclude Include="Mat4f.h" />
+    <ClInclude Include="RigidBody.h" />
     <ClInclude Include="Vec3f.h" />
     <ClInclude Include="Vec4f.h" />
   </ItemGroup>

@@ -34,13 +34,14 @@ int main() {
     ZBuffer z_buffer{ w, h, std::vector<float>(w * h) };
 
     std::vector<Polygon> polygons;
-    std::string model_path = "assets/house/house.obj";
+    std::string model_path = "assets/brick/brick.obj";
     load_model(model_path, polygons); // TODO: Что делать в случае ошибки/исключения?
     if (polygons.empty()) {
         std::println("Failed to load model: {}", model_path);
         return 1;
     }
 
+    /*
     sf::Image house_texture_image;
     if (!house_texture_image.loadFromFile("assets/house/house.jpg")) {
         std::println("Failed to load texture: assets/house/house.jpg");
@@ -51,46 +52,35 @@ int main() {
         house_texture_image.getSize().y,
         house_texture_image.getPixelsPtr()
     };
+    */
 
     auto measure_start = high_res_clock::now();
     int frame_count = 0;
 
-    const float wheel_yaw_step_rad = 0.1f * static_cast<float>(std::numbers::pi / 180.0);
-    const float two_pi = static_cast<float>(std::numbers::pi * 2.0);
+    float two_pi = static_cast<float>(std::numbers::pi * 2.0);
     float angle_rad_accum = 0.0f;
     while (window.isOpen()) {
         while (const std::optional event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {
                 window.close();
             }
-            else if (const auto* wheel = event->getIf<sf::Event::MouseWheelScrolled>()) {
-                angle_rad_accum += wheel->delta * wheel_yaw_step_rad;
-                angle_rad_accum = std::fmod(angle_rad_accum, two_pi);
-                if (angle_rad_accum < 0.0f) {
-                    angle_rad_accum += two_pi;
-                }
-                std::println("angle_rad = {}", angle_rad_accum);
-            }
+        }
+         
+        angle_rad_accum += 0.01f;
+        angle_rad_accum = std::fmod(angle_rad_accum, two_pi);
+        if (angle_rad_accum < 0.0f) {
+            angle_rad_accum += two_pi;
         }
 
         clear_framebuffer(Color{ 255, 255, 255, 255 }, framebuffer);
         clear_z_buffer(1.0f, z_buffer);
 
-        Mat4f translation = Mat4f::create_translation(Vec3f{ 0.3f, -1.3f, -6.5f });
+        Mat4f translation = Mat4f::create_translation(Vec3f{ 0.0f, -1.3f, -6.5f });
         Mat4f rotation_x = Mat4f::create_rotation_x(17.0f * static_cast<float>(std::numbers::pi / 180.0));
         Mat4f rotation_y = Mat4f::create_rotation_y(angle_rad_accum);
-        
-        // Углы с дырками.
-        //Mat4f rotation_y = Mat4f::create_rotation_y(1.855295f);
-        //Mat4f rotation_y = Mat4f::create_rotation_y(3.6441789f);
-        //Mat4f rotation_y = Mat4f::create_rotation_y(4.031621f);
-        //Mat4f rotation_y = Mat4f::create_rotation_y(2.661763f);
-        //Mat4f rotation_y = Mat4f::create_rotation_y(5.3827553f);
-        //Mat4f rotation_y = Mat4f::create_rotation_y(5.2394967f);
-
-        //Mat4f rotation_y = Mat4f::create_rotation_y(30.0f * static_cast<float>(std::numbers::pi / 180.0));
         Mat4f rotation_z = Mat4f::create_rotation_z(0.0f);
-        Mat4f scale = Mat4f::create_scale_x(0.03f) * Mat4f::create_scale_y(0.03f) * Mat4f::create_scale_z(0.03f);
+        //Mat4f scale = Mat4f::create_scale_x(0.03f) * Mat4f::create_scale_y(0.03f) * Mat4f::create_scale_z(0.03f);
+        Mat4f scale;
         Mat4f model = translation * rotation_z * rotation_x * rotation_y * scale;
         float fov_vert_rad = static_cast<float>(45.0 * (std::numbers::pi / 180.0));
         float aspect_ratio = static_cast<float>(framebuffer.w) / framebuffer.h;
@@ -102,8 +92,8 @@ int main() {
             -10.0f,
             fov_vert_rad / 2.0f
         };
-        rasterize_polygons_flat_shaded_textured_affine(polygons, house_texture, light, framebuffer, z_buffer, mvp);
-        //rasterize_polygons_flat_shaded(polygons, light, framebuffer, z_buffer, mvp);
+        //rasterize_polygons_flat_shaded_textured_affine(polygons, house_texture, light, framebuffer, z_buffer, mvp);
+        rasterize_polygons_flat_shaded(polygons, light, framebuffer, z_buffer, mvp);
 
         framebuffer_texture.update(framebuffer.rgba_array.data());
 
@@ -148,8 +138,8 @@ void load_model(const std::string& model_path, std::vector<Polygon>& polygons) {
                 attrib.vertices[3 * index0.vertex_index + 1],
                 attrib.vertices[3 * index0.vertex_index + 2]
             }, TexCoord{
-                attrib.texcoords[2 * index0.texcoord_index + 0],
-                attrib.texcoords[2 * index0.texcoord_index + 1]
+                //attrib.texcoords[2 * index0.texcoord_index + 0],
+                //attrib.texcoords[2 * index0.texcoord_index + 1]
             } };
 
             Vertex v1{ Vec3f{
@@ -157,8 +147,8 @@ void load_model(const std::string& model_path, std::vector<Polygon>& polygons) {
                 attrib.vertices[3 * index1.vertex_index + 1],
                 attrib.vertices[3 * index1.vertex_index + 2]
             }, TexCoord{
-                attrib.texcoords[2 * index1.texcoord_index + 0],
-                attrib.texcoords[2 * index1.texcoord_index + 1]
+                //attrib.texcoords[2 * index1.texcoord_index + 0],
+                //attrib.texcoords[2 * index1.texcoord_index + 1]
             } };
 
             Vertex v2{ Vec3f{
@@ -166,8 +156,8 @@ void load_model(const std::string& model_path, std::vector<Polygon>& polygons) {
                 attrib.vertices[3 * index2.vertex_index + 1],
                 attrib.vertices[3 * index2.vertex_index + 2]
             }, TexCoord{
-                attrib.texcoords[2 * index2.texcoord_index + 0],
-                attrib.texcoords[2 * index2.texcoord_index + 1]
+                //attrib.texcoords[2 * index2.texcoord_index + 0],
+                //attrib.texcoords[2 * index2.texcoord_index + 1]
             } };
 
 			//polygons.push_back(Polygon{ { v0, v1, v2 }, Color{ 255, 135, 0, 255 } });
