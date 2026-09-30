@@ -91,13 +91,14 @@
     <ClCompile Include="graphics.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Mat4f.cpp" />
+    <ClCompile Include="physics.cpp" />
     <ClCompile Include="Vec3f.cpp" />
     <ClCompile Include="Vec4f.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="graphics.h" />
     <ClInclude Include="Mat4f.h" />
-    <ClInclude Include="RigidBody.h" />
+    <ClInclude Include="physics.h" />
     <ClInclude Include="Vec3f.h" />
     <ClInclude Include="Vec4f.h" />
   </ItemGroup>

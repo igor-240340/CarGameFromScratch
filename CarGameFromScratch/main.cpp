@@ -13,7 +13,9 @@
 #include "Vec4f.h"
 #include "Mat4f.h"
 #include "graphics.h"
+#include "physics.h"
 
+void f();
 void load_model(const std::string& model_path, std::vector<Polygon>& polygons);
 
 using high_res_clock = std::chrono::high_resolution_clock;
@@ -111,6 +113,11 @@ int main() {
     }
 
     return 0;
+}
+
+void f() {
+    RigidBody brick;
+    brick.set_box();
 }
 
 void load_model(const std::string& model_path, std::vector<Polygon>& polygons) {
