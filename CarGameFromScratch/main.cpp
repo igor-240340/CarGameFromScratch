@@ -116,8 +116,9 @@ int main() {
 }
 
 void f() {
-    RigidBody brick;
-    brick.set_box();
+    RigidBody box;
+    BoxShape box_shape;
+    box.attach_shape(box_shape);
 }
 
 void load_model(const std::string& model_path, std::vector<Polygon>& polygons) {

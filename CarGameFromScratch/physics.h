@@ -1,6 +1,9 @@
 #pragma once
 
+class BoxShape {
+};
+
 class RigidBody {
 public:
-	void set_box();
+	void attach_shape(BoxShape shape);
 };

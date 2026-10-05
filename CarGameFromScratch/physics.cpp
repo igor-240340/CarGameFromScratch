@@ -1,4 +1,4 @@
 #include "physics.h"
 
-void RigidBody::set_box() {
+void RigidBody::attach_shape(BoxShape shape) {
 }
