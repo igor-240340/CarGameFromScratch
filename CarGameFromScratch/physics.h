@@ -1,9 +1,14 @@
 #pragma once
 
-class BoxShape {
-};
+#include "Vec3f.h"
+#include "Quat.h"
 
 class RigidBody {
 public:
-	void attach_shape(BoxShape shape);
+
+private:
+	float inverse_mass = 0.0f;
+	Vec3f position;
+	Quat orientation;
+	Vec3f linear_velocity;
 };

@@ -116,9 +116,7 @@ int main() {
 }
 
 void f() {
-    RigidBody box;
-    BoxShape box_shape;
-    box.attach_shape(box_shape);
+    RigidBody car_body;
 }
 
 void load_model(const std::string& model_path, std::vector<Polygon>& polygons) {

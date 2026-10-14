@@ -99,6 +99,7 @@
     <ClInclude Include="graphics.h" />
     <ClInclude Include="Mat4f.h" />
     <ClInclude Include="physics.h" />
+    <ClInclude Include="Quat.h" />
     <ClInclude Include="Vec3f.h" />
     <ClInclude Include="Vec4f.h" />
   </ItemGroup>
