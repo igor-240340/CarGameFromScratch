@@ -90,13 +90,16 @@
   <ItemGroup>
     <ClCompile Include="graphics.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Mat3.cpp" />
     <ClCompile Include="Mat4f.cpp" />
     <ClCompile Include="physics.cpp" />
+    <ClCompile Include="Quat.cpp" />
     <ClCompile Include="Vec3f.cpp" />
     <ClCompile Include="Vec4f.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="graphics.h" />
+    <ClInclude Include="Mat3.h" />
     <ClInclude Include="Mat4f.h" />
     <ClInclude Include="physics.h" />
     <ClInclude Include="Quat.h" />

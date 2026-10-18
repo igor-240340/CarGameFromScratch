@@ -2,6 +2,8 @@
 #include <algorithm>
 
 #include "Mat4f.h"
+#include "Mat3.h"
+#include "Quat.h"
 
 // Identity.
 Mat4f::Mat4f() {
@@ -84,6 +86,14 @@ Mat4f Mat4f::operator*(const Mat4f& mat_right_columns) const {
 	prod.data[11] = prod_row_3.z;
 	prod.data[15] = prod_row_3.w;
 	return prod;
+}
+
+Mat3 Mat4f::get_upper_left_mat3() const {
+	return Mat3(
+		Vec3f(data[0], data[1], data[2]),
+		Vec3f(data[4], data[5], data[6]),
+		Vec3f(data[8], data[9], data[10])
+	);
 }
 
 Mat4f Mat4f::create_identity() {
@@ -201,6 +211,25 @@ Mat4f Mat4f::create_rotation_z(const float angle_rad) {
 	mat_rot.data[1] = sin;
 	mat_rot.data[4] = -sin;
 	mat_rot.data[5] = cos;
+
+	return mat_rot;
+}
+
+// NOTE: q должен быть нормализован.
+Mat4f Mat4f::create_rotation(const Quat& q) {
+	Mat4f mat_rot;
+
+	mat_rot.data[0] = 1.0f - 2.0f * (q.y * q.y + q.z * q.z);
+	mat_rot.data[1] = 2.0f * (q.x * q.y + q.w * q.z);
+	mat_rot.data[2] = 2.0f * (q.x * q.z - q.w * q.y);
+
+	mat_rot.data[4] = 2.0f * (q.x * q.y - q.w * q.z);
+	mat_rot.data[5] = 1.0f - 2.0f * (q.x * q.x + q.z * q.z);
+	mat_rot.data[6] = 2.0f * (q.y * q.z + q.w * q.x);
+
+	mat_rot.data[8] = 2.0f * (q.x * q.z + q.w * q.y);
+	mat_rot.data[9] = 2.0f * (q.y * q.z - q.w * q.x);
+	mat_rot.data[10] = 1.0f - 2.0f * (q.x * q.x + q.y * q.y);
 
 	return mat_rot;
 }

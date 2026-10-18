@@ -5,6 +5,9 @@
 #include "Vec3f.h"
 #include "Vec4f.h"
 
+class Mat3;
+class Quat;
+
 // Column-major order.
 class Mat4f {
 public:
@@ -12,6 +15,8 @@ public:
 
 	Vec4f operator*(const Vec4f& vec) const;
 	Mat4f operator*(const Mat4f& vec) const;
+
+	Mat3 get_upper_left_mat3() const;
 
 	static Mat4f create_identity();
 
@@ -24,6 +29,7 @@ public:
 	static Mat4f create_rotation_x(float angle_rad);
 	static Mat4f create_rotation_y(float angle_rad);
 	static Mat4f create_rotation_z(float angle_rad);
+	static Mat4f create_rotation(const Quat& q);
 
 	static Mat4f create_scale_x(float scale);
 	static Mat4f create_scale_y(float scale);
