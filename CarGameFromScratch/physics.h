@@ -30,9 +30,10 @@ private:
 
 	Vec3f position_world;
 	Quat orientation;
-	Vec3f linear_velocity;
+	Vec3f linear_velocity_world;
+	Vec3f angular_velocity_world;
 	Mat4f transform_mat;
 
-	Vec3f force_accum;
-	Vec3f torque_accum;
+	Vec3f net_force;
+	Vec3f net_torque;
 };

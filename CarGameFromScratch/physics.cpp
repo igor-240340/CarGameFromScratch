@@ -19,16 +19,26 @@ void RigidBody::add_force_at_point(const Vec3f& force_world, const Vec3f& point_
 	Vec3f point_local = point_world;
 	point_local = point_local - position_world;
 
-	force_accum = force_accum + force_world;
-	torque_accum = torque_accum + Vec3f::cross(force_world, point_local);
+	net_force = net_force + force_world;
+	net_torque = net_torque + Vec3f::cross(force_world, point_local);
 }
 
 void RigidBody::clear_accumulators() {
-	force_accum = Vec3f::zero;
-	torque_accum = Vec3f::zero;
+	net_force = Vec3f::zero;
+	net_torque = Vec3f::zero;
 }
 
 void RigidBody::integrate(float dt) {
+	Vec3f linear_accel = (net_force * inverse_mass) + Vec3f(0.0f, -9.8f, 0.0f);
+	position_world = position_world + (linear_velocity_world * dt);
+
+	Vec3f angular_accel_world = inverse_inertia_tensor_world * net_torque;
+	orientation.add_scaled_vector(angular_velocity_world, dt);
+
+	linear_velocity_world = linear_velocity_world + (linear_accel * dt);
+	angular_velocity_world = angular_velocity_world + (angular_accel_world * dt);
+
+	calc_derived_data();
 	clear_accumulators();
 }
 

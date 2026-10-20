@@ -11,6 +11,7 @@ public:
 	Mat3(const Vec3f& col_0, const Vec3f& col_1, const Vec3f& col_2);
 
 	Mat3 operator*(const Mat3& mat) const;
+	Vec3f operator*(const Vec3f& vec) const;
 
 	static Mat3 create_identity();
 	static Mat3 inverse(const Mat3& mat);

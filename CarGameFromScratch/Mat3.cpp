@@ -34,6 +34,14 @@ Mat3 Mat3::operator*(const Mat3& mat_right) const {
 	return prod;
 }
 
+Vec3f Mat3::operator*(const Vec3f& vec) const {
+	return Vec3f(
+		data[0] * vec.x + data[3] * vec.y + data[6] * vec.z,
+		data[1] * vec.x + data[4] * vec.y + data[7] * vec.z,
+		data[2] * vec.x + data[5] * vec.y + data[8] * vec.z
+	);
+}
+
 Mat3 Mat3::create_identity() {
     return Mat3();
 }
