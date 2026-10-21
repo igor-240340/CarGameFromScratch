@@ -1,3 +1,5 @@
+#include <cassert>
+
 #include "physics.h"
 
 void RigidBody::calc_derived_data() {
@@ -9,6 +11,11 @@ void RigidBody::calc_derived_data() {
 		inverse_inertia_tensor,
 		transform_mat
 	);
+}
+
+void RigidBody::set_mass(float mass) {
+	assert(mass != 0.0f);
+	inverse_mass = 1.0f / mass;
 }
 
 void RigidBody::set_inertia_tensor(const Mat3& inertia_tensor) {
@@ -23,13 +30,21 @@ void RigidBody::add_force_at_point(const Vec3f& force_world, const Vec3f& point_
 	net_torque = net_torque + Vec3f::cross(force_world, point_local);
 }
 
+void RigidBody::set_position(const Vec3f& pos) {
+	this->position_world = pos;
+}
+
+Mat4f RigidBody::get_tranform() const {
+	return transform_mat;
+}
+
 void RigidBody::clear_accumulators() {
 	net_force = Vec3f::zero;
 	net_torque = Vec3f::zero;
 }
 
 void RigidBody::integrate(float dt) {
-	Vec3f linear_accel = (net_force * inverse_mass) + Vec3f(0.0f, -9.8f, 0.0f);
+	Vec3f linear_accel = (net_force * inverse_mass) /*+ Vec3f(0.0f, -9.8f, 0.0f)*/;
 	position_world = position_world + (linear_velocity_world * dt);
 
 	Vec3f angular_accel_world = inverse_inertia_tensor_world * net_torque;
