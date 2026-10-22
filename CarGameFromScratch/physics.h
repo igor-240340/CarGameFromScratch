@@ -7,7 +7,7 @@
 
 class RigidBody {
 public:
-	void calc_derived_data();
+	void calc_derivatives();
 	void set_mass(float mass);
 	void set_inertia_tensor(const Mat3& inertia_tensor);
 	void add_force_at_point(const Vec3f& force_world, const Vec3f& point_world);

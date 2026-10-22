@@ -2,7 +2,7 @@
 
 #include "physics.h"
 
-void RigidBody::calc_derived_data() {
+void RigidBody::calc_derivatives() {
 	orientation.normalize();
 	calc_transform_mat(transform_mat, position_world, orientation);
 	transform_inertia_tensor(
@@ -53,7 +53,7 @@ void RigidBody::integrate(float dt) {
 	linear_velocity_world = linear_velocity_world + (linear_accel * dt);
 	angular_velocity_world = angular_velocity_world + (angular_accel_world * dt);
 
-	calc_derived_data();
+	calc_derivatives();
 	clear_accumulators();
 }
 
